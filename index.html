@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>京都・大阪冬日旅 - 實時同步共享版</title>
+    <title>京都・大阪冬日旅 - 雲端同步共享版</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- React, ReactDOM, Babel -->
@@ -33,7 +33,7 @@
     <div id="root">
         <div class="flex flex-col items-center justify-center min-h-screen text-slate-400 text-center p-4">
             <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mb-4"></div>
-            <p class="font-bold text-slate-600">正在建立雲端連線...</p>
+            <p class="font-bold text-slate-600">正在檢查雲端連線配置...</p>
         </div>
     </div>
 
@@ -52,12 +52,27 @@
         import { initializeApp } from 'firebase/app';
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
         import { getFirestore, doc, setDoc, updateDoc, onSnapshot, getDoc } from 'firebase/firestore';
-        // 將模組掛載到 window 供 Babel 轉譯後的 React 使用
-        window.FirebaseAPI = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, updateDoc, onSnapshot, getDoc };
+        // 將模組掛載供後續 React 使用
+        window.FirebaseBridge = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, updateDoc, onSnapshot, getDoc };
     </script>
 
     <script type="text/babel">
         const { useState, useEffect, useMemo, useCallback } = React;
+
+        // ==========================================
+        // 🛠️ 重要：請在下方貼上你自己的 Firebase 配置
+        // ==========================================
+        const myFirebaseConfig = null; 
+        /* 範例格式：
+           const myFirebaseConfig = {
+               apiKey: "AIzaSy...",
+               authDomain: "your-app.firebaseapp.com",
+               projectId: "your-app",
+               storageBucket: "your-app.appspot.com",
+               messagingSenderId: "123456",
+               appId: "1:123456:web:abcd"
+           };
+        */
 
         // 圖示組件
         const Icon = ({ name, size = 16, className = "" }) => {
@@ -86,63 +101,65 @@
 
             const [itineraryDB, setItineraryDB] = useState({});
             const [shoppingDB, setShoppingDB] = useState({});
-            const [statusData, setStatusData] = useState({ temp: "2°C - 9°C", transport: "ICOCA", misc: "連線正常" });
+            const [statusData, setStatusData] = useState({ temp: "2°C - 9°C", transport: "ICOCA", misc: "雲端已連線" });
             const [dailyNotes, setDailyNotes] = useState({});
 
-            // 確保 appId 的穩定性
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'shared-trip-v2026';
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'trip-kyoto-shared-v2026';
 
             const defaultItinerary = {
                 1: [
                     { id: 'd1-1', time: '08:05', title: '桃園機場起飛 (CI156)', note: '5:00 派車出發', isDefault: true },
-                    { id: 'd1-2', time: '11:35', title: '抵達關西機場 T1', note: '從 C 出口搭利木津巴士', isDefault: true }
+                    { id: 'd1-4', time: '15:00', title: '素居旅舍 Check-in', note: '步行10分鐘可達清水寺', link: 'https://guesthousesoi.com/rooms-tw/', isDefault: true }
                 ]
             };
 
-            // --- 核心：Firebase 初始化與權限處理 ---
+            // --- Firebase 初始化與授權 (修正權限與錯誤捕獲) ---
             useEffect(() => {
-                let isMounted = true;
                 let unsubscribe = null;
-
-                const initSync = async () => {
-                    if (!window.FirebaseAPI) return;
-                    const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, doc, onSnapshot, setDoc, getDoc } = window.FirebaseAPI;
+                const init = async () => {
+                    if (!window.FirebaseBridge) return;
+                    const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, doc, onSnapshot, setDoc } = window.FirebaseBridge;
 
                     try {
-                        // 1. 取得 Firebase 配置
-                        const config = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+                        // 1. 決定使用哪個配置
+                        let config = null;
+                        if (typeof __firebase_config !== 'undefined') {
+                            config = JSON.parse(__firebase_config);
+                        } else if (myFirebaseConfig) {
+                            config = myFirebaseConfig;
+                        }
+
                         if (!config) {
-                            if (isMounted) setError("雲端配置遺失。");
+                            setError("⚠️ 雲端配置遺失。如果在本地或 GitHub 使用，請先在程式碼中填入你的 Firebase 配置。");
+                            setIsLoading(false);
                             return;
                         }
 
-                        // 2. 初始化 App
                         const app = initializeApp(config);
                         const auth = getAuth(app);
                         const db = getFirestore(app);
 
-                        // 3. RULE 3: 先驗證登入
-                        const initAuth = async () => {
+                        // 2. 匿名登入 (RULE 3)
+                        const authUser = async () => {
                             if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                                 return await signInWithCustomToken(auth, __initial_auth_token);
                             } else {
                                 return await signInAnonymously(auth);
                             }
                         };
+                        
+                        const result = await authUser();
+                        setUser(result.user);
 
-                        const authResult = await initAuth();
-                        if (isMounted) setUser(authResult.user);
+                        // 3. 實時監聽 (RULE 1: 使用 6 段路徑)
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'itinerary_data', 'shared_main');
 
-                        // 4. RULE 1: 正確的 6 段路徑
-                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'itinerary', 'shared_itinerary');
-
-                        // 5. 啟動即時監聽
                         unsubscribe = onSnapshot(docRef, (docSnap) => {
                             if (docSnap.exists()) {
                                 const data = docSnap.data();
                                 setItineraryDB(data.itinerary || defaultItinerary);
                                 setShoppingDB(data.shopping || {});
-                                setStatusData(data.status || { temp: "2°C - 9°C", transport: "ICOCA", misc: "雲端已同步" });
+                                setStatusData(data.status || { temp: "2°C - 9°C", transport: "ICOCA", misc: "雲端已連線" });
                                 setDailyNotes(data.notes || {});
                                 setSyncStatus('online');
                             } else {
@@ -150,61 +167,54 @@
                                 setDoc(docRef, {
                                     itinerary: defaultItinerary,
                                     shopping: {},
-                                    status: { temp: "2°C - 9°C", transport: "ICOCA", misc: "初始同步成功" },
+                                    status: { temp: "2°C - 9°C", transport: "ICOCA", misc: "首次同步成功" },
                                     notes: {},
                                     lastUpdated: new Date().toISOString()
                                 });
                             }
-                            if (isMounted) setIsLoading(false);
+                            setIsLoading(false);
                         }, (err) => {
-                            console.error("Firestore Error:", err);
-                            if (isMounted) {
-                                setError("權限不足或連線失敗。請確認 Firestore 規則。");
-                                setSyncStatus('error');
-                            }
+                            console.error("Firestore Listen Error:", err);
+                            setError("權限不足或連線受阻。請確保 Firebase 規則已設為測試模式（或允許讀寫）。");
+                            setIsLoading(false);
                         });
 
                     } catch (e) {
-                        console.error("Initialization Failed:", e);
-                        if (isMounted) setError("啟動失敗: " + e.message);
+                        setError("系統啟動失敗: " + e.message);
+                        setIsLoading(false);
                     }
                 };
 
-                // 等待模組就緒
-                const interval = setInterval(() => {
-                    if (window.FirebaseAPI) {
-                        initSync();
-                        clearInterval(interval);
+                const waitInterval = setInterval(() => {
+                    if (window.FirebaseBridge) {
+                        init();
+                        clearInterval(waitInterval);
                     }
-                }, 50);
+                }, 100);
 
                 return () => {
-                    isMounted = false;
                     if (unsubscribe) unsubscribe();
                 };
             }, [appId]);
 
-            // --- 寫入雲端功能 ---
+            // --- 寫入雲端 ---
             const saveToCloud = useCallback(async (updates) => {
-                if (!user || !window.FirebaseAPI) return;
+                if (!user || !window.FirebaseBridge) return;
                 setSyncStatus('syncing');
-                const { getFirestore, doc, updateDoc } = window.FirebaseAPI;
+                const { getFirestore, doc, updateDoc } = window.FirebaseBridge;
                 const db = getFirestore();
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'itinerary', 'shared_itinerary');
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'itinerary_data', 'shared_main');
                 
                 try {
-                    await updateDoc(docRef, { 
-                        ...updates, 
-                        lastUpdated: new Date().toISOString() 
-                    });
+                    await updateDoc(docRef, { ...updates, lastUpdated: new Date().toISOString() });
                     setSyncStatus('online');
                 } catch (e) {
-                    console.error("Cloud Save error:", e);
+                    console.error("Save error:", e);
                     setSyncStatus('error');
                 }
             }, [user, appId]);
 
-            // --- 行程排序與工具 ---
+            // --- 邏輯功能 ---
             const getMinutes = (timeStr) => {
                 if (!timeStr) return 9999;
                 const match = timeStr.match(/(\d{1,2})[:：](\d{1,2})/);
@@ -216,14 +226,16 @@
             }, [activeDay, itineraryDB]);
 
             const generateFullText = () => {
-                let text = "✈️ 京都・大阪冬日旅行程總覽 ✈️\n\n";
+                let text = "✈️ 京都・大阪冬日旅行程 ✈️\n\n";
                 for (let d = 1; d <= 7; d++) {
-                    const days = ["", "2/8", "2/9", "2/10", "2/11", "2/12", "2/13", "2/14"];
-                    text += `【Day ${d} | ${days[d]}】\n`;
-                    const dayItin = [...(itineraryDB[d] || [])].sort((a,b) => getMinutes(a.time) - getMinutes(b.time));
-                    dayItin.forEach(i => text += `  ⏰ ${i.time || '--:--'} ${i.title}\n`);
-                    if (dailyNotes[d]) text += `  📝 備註: ${dailyNotes[d]}\n`;
-                    text += "\n";
+                    const itin = itineraryDB[d] || [];
+                    if (itin.length > 0) {
+                        text += `【Day ${d}】\n`;
+                        itin.sort((a,b) => getMinutes(a.time)-getMinutes(b.time)).forEach(i => {
+                            text += `  ⏰ ${i.time || '--:--'} ${i.title}\n`;
+                        });
+                        text += "\n";
+                    }
                 }
                 return text;
             };
@@ -239,7 +251,6 @@
                 setTimeout(() => setCopied(false), 2000);
             };
 
-            // --- UI 彈窗處理 ---
             const openModal = (type, item = null) => {
                 setModalType(type);
                 if (item) {
@@ -271,24 +282,39 @@
                 setShowModal(false);
             };
 
-            if (error) return <div className="min-h-screen flex items-center justify-center p-8 bg-white text-center text-rose-500 font-bold"><div>⚠️ 連線中斷<br/><span className="text-xs font-normal text-slate-400">{error}</span><br/><button onClick={() => location.reload()} className="mt-4 px-6 py-2 bg-indigo-600 text-white rounded-xl">點此重試</button></div></div>;
-            if (isLoading) return <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mb-4"></div><p className="text-slate-500 font-bold text-xs uppercase tracking-widest">Shared Database Connecting...</p></div>;
+            if (isLoading) {
+                return (
+                    <div className="flex flex-col items-center justify-center min-h-screen text-slate-400">
+                        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mb-4"></div>
+                        <p className="font-bold">同步雲端資料中...</p>
+                    </div>
+                );
+            }
+
+            if (error) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-8 bg-white text-center text-rose-500 font-bold">
+                        <div>
+                            ⚠️ 連線中斷<br/>
+                            <span className="text-xs font-normal text-slate-400 block mt-2">{error}</span>
+                            <button onClick={() => location.reload()} className="mt-6 px-8 py-3 bg-indigo-600 text-white rounded-2xl shadow-lg">點此重試</button>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="flex flex-col min-h-screen text-slate-800">
                     <div className="sync-badge">
                         <div className={`w-2 h-2 rounded-full ${syncStatus === 'online' ? 'bg-green-500' : syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'}`}></div>
-                        <span className="text-slate-400 uppercase tracking-tighter">{syncStatus === 'online' ? '已同步' : syncStatus === 'syncing' ? '更新中' : '中斷'}</span>
+                        <span className="text-slate-400 uppercase tracking-tighter">{syncStatus === 'online' ? '已同步' : syncStatus === 'syncing' ? '傳輸中' : '連線中斷'}</span>
                     </div>
 
                     <header className="bg-gradient-header text-white p-6 shadow-xl sticky top-0 z-30">
                         <div className="max-w-4xl mx-auto flex justify-between items-center">
                             <div className="flex items-center gap-3">
                                 <Icon name="Cloud" size={24} className="text-indigo-200" />
-                                <div>
-                                    <h1 className="text-xl md:text-2xl font-bold tracking-tight">京都・大阪冬日旅</h1>
-                                    <p className="text-indigo-200 text-[10px] uppercase font-bold tracking-widest opacity-60">Real-time Sync Map</p>
-                                </div>
+                                <h1 className="text-xl md:text-2xl font-bold tracking-tight">京都・大阪共享地圖</h1>
                             </div>
                             <button onClick={() => setShowExportModal(true)} className="bg-white text-indigo-900 px-4 py-2 rounded-xl text-xs font-black shadow-lg hover:bg-indigo-50 transition-all flex items-center gap-1">
                                 <Icon name="List" /> 匯出
@@ -311,8 +337,8 @@
                             <div className="lg:col-span-2 space-y-6">
                                 <section className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
                                     <div className="flex justify-between items-center mb-6">
-                                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center"><Icon name="Calendar" /> 行程路線 (手機/電腦同步)</h3>
-                                        <button onClick={() => openModal('itinerary')} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full text-xs font-bold hover:bg-indigo-100 flex items-center transition-all"><Icon name="Plus" /> 新增行程</button>
+                                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center"><Icon name="Calendar" /> 行程地圖 (即時同步)</h3>
+                                        <button onClick={() => openModal('itinerary')} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full text-xs font-bold hover:bg-indigo-100 flex items-center transition-all"><Icon name="Plus" /> 新增</button>
                                     </div>
                                     <div className="space-y-6 relative">
                                         {sortedItinerary.map((item, i) => (
@@ -324,7 +350,7 @@
                                                         <span className={`text-xs font-black ${item.isDefault ? 'text-indigo-500' : 'text-emerald-600'} md:w-16`}>{item.time || '未定時'}</span>
                                                         <div className="flex justify-between items-center flex-1">
                                                             <h4 className="font-bold text-lg">{item.link ? <a href={item.link} target="_blank" rel="noopener noreferrer" className="clickable-link" onClick={(e) => e.stopPropagation()}>{item.title} <Icon name="Link" size={14} className="opacity-60" /></a> : item.title}</h4>
-                                                            <div className="opacity-0 group-hover:opacity-100 text-slate-300 text-[10px] font-bold uppercase tracking-tighter">✏️ 編輯</div>
+                                                            <div className="opacity-0 group-hover:opacity-100 text-slate-300 text-[10px] font-bold">編輯</div>
                                                         </div>
                                                     </div>
                                                     {item.note && <p className="text-sm p-3 rounded-2xl border bg-slate-50 border-slate-100 mt-2 text-slate-600 leading-relaxed font-medium">{item.note}</p>}
@@ -333,8 +359,8 @@
                                         ))}
                                     </div>
                                 </section>
-                                <section className="bg-amber-50 rounded-3xl p-6 border border-amber-200 space-y-3 shadow-sm">
-                                    <h4 className="font-bold text-amber-900 text-sm flex items-center"><Icon name="Info" /> 當日私房筆記 (點擊編輯)</h4>
+                                <section className="bg-amber-50 rounded-3xl p-6 border border-amber-200 space-y-3">
+                                    <h4 className="font-bold text-amber-900 text-sm flex items-center"><Icon name="Info" /> 當日備註 (點擊編輯)</h4>
                                     <textarea 
                                         className="w-full bg-transparent border-none focus:ring-0 text-amber-800 text-sm font-medium min-h-[100px]"
                                         placeholder="在這裡記錄今天的筆記..."
@@ -351,29 +377,29 @@
                             <div className="space-y-6">
                                 <section className="bg-white rounded-3xl shadow-sm p-6 border border-slate-200">
                                     <div className="flex justify-between items-center mb-4">
-                                        <div className="flex items-center gap-2 text-rose-500 font-black text-sm uppercase tracking-wider"><Icon name="ShoppingBag" /> 區域購物清單</div>
+                                        <div className="flex items-center gap-2 text-rose-500 font-black text-sm uppercase tracking-wider"><Icon name="ShoppingBag" /> 購物清單</div>
                                         <button onClick={() => openModal('shopping')} className="text-rose-400 hover:text-rose-600"><Icon name="Plus" /></button>
                                     </div>
                                     <div className="space-y-3">
                                         {(shoppingDB[activeDay] || []).map((shop) => (
                                             <div key={shop.id} onClick={() => openModal('shopping', shop)} className="p-4 rounded-2xl border border-slate-100 bg-slate-50 hover:bg-rose-50 cursor-pointer group transition-all">
-                                                <div className="font-bold text-slate-800 text-sm flex items-center gap-1">
+                                                <div className="font-bold text-slate-800 text-sm">
                                                     {shop.link ? <a href={shop.link} target="_blank" rel="noopener noreferrer" className="clickable-link" onClick={(e) => e.stopPropagation()}>{shop.title} <Icon name="Link" size={12} /></a> : shop.title}
                                                 </div>
-                                                {shop.desc && <div className="text-[10px] text-slate-400 mt-1 font-medium">{shop.desc}</div>}
+                                                {shop.desc && <div className="text-[10px] text-slate-400 mt-1">{shop.desc}</div>}
                                             </div>
                                         ))}
                                     </div>
                                 </section>
 
                                 <section className="bg-slate-900 rounded-3xl p-6 text-white shadow-xl">
-                                    <h3 className="font-bold text-[10px] text-indigo-300 uppercase tracking-widest mb-5 text-center tracking-widest">實時同步儀表板</h3>
+                                    <h3 className="font-bold text-[10px] text-indigo-300 uppercase tracking-widest mb-5 text-center tracking-widest">同步儀表板</h3>
                                     <div className="space-y-5">
                                         {['temp', 'transport', 'misc'].map(key => (
                                             <div key={key} className="flex items-center gap-4 group">
                                                 <div className="text-2xl bg-white/10 p-2 rounded-xl font-bold">{key === 'temp' ? '🌡️' : key === 'transport' ? '🚄' : '📌'}</div>
                                                 <div className="flex-1">
-                                                    <div className="text-[10px] opacity-50 font-bold uppercase tracking-tighter">{key === 'temp' ? '氣溫預報' : key === 'transport' ? '交通工具' : '提醒事項'}</div>
+                                                    <div className="text-[10px] opacity-50 font-bold uppercase tracking-tighter">{key === 'temp' ? '氣溫' : key === 'transport' ? '交通' : '備註'}</div>
                                                     <input 
                                                         className="w-full bg-transparent border-none p-0 text-sm font-black focus:ring-0 text-white" 
                                                         value={statusData[key] || ''} 
@@ -394,17 +420,17 @@
 
                     {showModal && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                            <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl scale-in">
+                            <div className="bg-white rounded-3xl p-6 w-full max-sm shadow-2xl scale-in">
                                 <div className="flex justify-between items-center mb-4">
                                     <h3 className="text-xl font-bold flex items-center"><Icon name={editingItem ? "Edit" : "Plus"} /> {editingItem ? '編輯' : '新增'}內容</h3>
                                     {editingItem && <button onClick={() => handleDelete(editingItem.id)} className="text-slate-300 hover:text-red-500"><Icon name="Trash" size={20} /></button>}
                                 </div>
                                 <form onSubmit={handleSaveForm} className="space-y-4">
-                                    {modalType === 'itinerary' && <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">時間 (例如 09:30)</label><input type="text" value={formData.time} placeholder="14:30" onChange={e => setFormData({...formData, time: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" /></div>}
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">標題名稱</label><input type="text" value={formData.title} placeholder="要去哪裡？" onChange={e => setFormData({...formData, title: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" required /></div>
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">連結網址 (URL)</label><input type="url" value={formData.link} placeholder="https://..." onChange={e => setFormData({...formData, link: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" /></div>
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">補充說明</label><input type="text" value={formData.note || formData.desc} placeholder="補充說明..." onChange={e => setFormData({...formData, note: e.target.value, desc: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" /></div>
-                                    <div className="flex gap-2 pt-2"><button type="button" onClick={() => setShowModal(false)} className="flex-1 p-3 font-bold text-slate-500">取消</button><button type="submit" className={`flex-1 p-3 text-white font-bold rounded-2xl shadow-lg transition-all ${modalType === 'itinerary' ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100' : 'bg-rose-500 hover:bg-rose-600 shadow-rose-200'}`}>同步並儲存</button></div>
+                                    {modalType === 'itinerary' && <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1">時間 (如 09:30)</label><input type="text" value={formData.time} placeholder="14:30" onChange={e => setFormData({...formData, time: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" /></div>}
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1">名稱 / 內容</label><input type="text" value={formData.title} placeholder="要做什麼？" onChange={e => setFormData({...formData, title: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" required /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1">網址連結</label><input type="url" value={formData.link} placeholder="https://..." onChange={e => setFormData({...formData, link: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase ml-1">描述</label><input type="text" value={formData.note || formData.desc} placeholder="補充說明..." onChange={e => setFormData({...formData, note: e.target.value, desc: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" /></div>
+                                    <div className="flex gap-2 pt-2"><button type="button" onClick={() => setShowModal(false)} className="flex-1 p-3 font-bold text-slate-500">取消</button><button type="submit" className={`flex-1 p-3 text-white font-bold rounded-2xl shadow-lg transition-all ${modalType === 'itinerary' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-500 hover:bg-rose-600 shadow-rose-200'}`}>儲存並同步</button></div>
                                 </form>
                             </div>
                         </div>
@@ -414,11 +440,11 @@
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl w-full max-w-2xl max-h-[90vh] shadow-2xl scale-in overflow-hidden flex flex-col">
                                 <div className="p-6 border-b flex justify-between items-center bg-slate-50">
-                                    <h3 className="text-xl font-bold">全行程彙整</h3>
+                                    <h3 className="text-xl font-bold">全行程匯出清單</h3>
                                     <button onClick={() => setShowExportModal(false)} className="text-slate-400 text-2xl font-bold">&times;</button>
                                 </div>
                                 <div className="flex-1 p-6 overflow-y-auto whitespace-pre-wrap font-mono text-sm leading-relaxed bg-white">{generateFullText()}</div>
-                                <div className="p-6 border-t bg-slate-50 flex gap-3"><button onClick={copyFullList} className={`flex-1 p-3 rounded-2xl font-bold transition-all ${copied ? 'bg-emerald-500' : 'bg-indigo-600'} text-white shadow-lg`}>{copied ? '✅ 已成功複製！' : '📋 一鍵複製文字行程'}</button></div>
+                                <div className="p-6 border-t bg-slate-50 flex gap-3"><button onClick={copyFullList} className={`flex-1 p-3 rounded-2xl font-bold transition-all ${copied ? 'bg-emerald-500' : 'bg-indigo-600'} text-white shadow-lg`}>{copied ? '✅ 已成功複製！' : '📋 一鍵複製文字'}</button></div>
                             </div>
                         </div>
                     )}
