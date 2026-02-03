@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>京都・大阪冬日旅 - 共享協作版</title>
+    <title>京都旅程 - 預約與建議系統</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- React, ReactDOM, Babel -->
@@ -12,25 +12,17 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
-        body { font-family: 'Noto Sans TC', sans-serif; margin: 0; padding: 0; background-color: #f8fafc; }
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        .bg-gradient-header { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%); }
-        .timeline-dot { width: 14px; height: 14px; border-radius: 50%; background-color: #6366f1; border: 3px solid #e0e7ff; z-index: 10; }
-        .timeline-dot-custom { width: 14px; height: 14px; border-radius: 50%; background-color: #10b981; border: 3px solid #d1fae5; z-index: 10; }
-        .chat-bubble { border-radius: 18px 18px 18px 2px; }
+        .bg-gradient-header { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); }
+        .card-shadow { box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05); }
+        .admin-glow { border: 2px solid #6366f1; box-shadow: 0 0 15px rgba(99, 102, 241, 0.2); }
         .fade-in { animation: fadeIn 0.4s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .sync-badge { position: fixed; bottom: 20px; right: 20px; z-index: 100; font-size: 10px; background: rgba(255,255,255,0.9); padding: 4px 12px; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); border: 1px solid #e2e8f0; display: flex; align-items: center; gap: 8px; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
-    <div id="root">
-        <div class="flex flex-col items-center justify-center min-h-screen text-slate-400 text-center p-4">
-            <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mb-4"></div>
-            <p class="font-bold text-slate-600">正在建立安全的協作連線...</p>
-        </div>
-    </div>
+    <div id="root"></div>
 
     <!-- Firebase SDK (Modular) -->
     <script type="importmap">
@@ -46,319 +38,239 @@
     <script type="module">
         import { initializeApp } from 'firebase/app';
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-        import { getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit } from 'firebase/firestore';
-        window.FBase = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, query, orderBy, limit };
+        import { getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, deleteDoc, query, getDocs } from 'firebase/firestore';
+        window.FCloud = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, addDoc, deleteDoc, query, getDocs };
     </script>
 
     <script type="text/babel">
-        const { useState, useEffect, useMemo, useCallback } = React;
+        const { useState, useEffect, useMemo } = React;
 
         // 圖示組件
         const Icon = ({ name, size = 16, className = "" }) => {
             const icons = {
-                MapPin: "📍", Calendar: "📅", ShoppingBag: "🛍️", Train: "🚄",
-                Info: "📝", Check: "✅", Copy: "📋", Plus: "➕",
-                Trash: "🗑️", Edit: "✏️", Save: "💾", Link: "🔗", 
-                Send: "✈️", Message: "💬", Users: "👥"
+                MapPin: "📍", Calendar: "📅", ShoppingBag: "🛍️", Info: "📝",
+                Check: "✅", Plus: "➕", Trash: "🗑️", Box: "📦",
+                User: "👤", Clock: "⏰", Rocket: "🚀", Shield: "🔒"
             };
-            return <span className={`mr-1 ${className}`} style={{fontSize: `${size}px`}}>{icons[name] || "•"}</span>;
+            return <span className={className} style={{fontSize: `${size}px`}}>{icons[name] || "•"}</span>;
         };
 
         const App = () => {
+            const [view, setView] = useState('user'); // 'user' or 'admin'
             const [activeDay, setActiveDay] = useState(1);
-            const [showModal, setShowModal] = useState(false);
-            const [formData, setFormData] = useState({ title: '', time: '', note: '', link: '' });
-            const [chatInput, setChatInput] = useState('');
-            
+            const [orders, setOrders] = useState([]);
+            const [formData, setFormData] = useState({ title: '', note: '' });
+            const [isSubmitting, setIsSubmitting] = useState(false);
             const [user, setUser] = useState(null);
             const [isLoading, setIsLoading] = useState(true);
-            const [syncStatus, setSyncStatus] = useState('connecting');
 
-            const [itineraryDB, setItineraryDB] = useState({});
-            const [chatMessages, setChatMessages] = useState([]);
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'trip-order-v1';
 
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'trip-collab-v2';
-
-            // --- Firebase 初始化與實時同步 ---
+            // --- Firebase 連線 ---
             useEffect(() => {
-                let unsubItin = null;
-                let unsubChat = null;
-
-                const startSync = async () => {
-                    if (!window.FBase) return;
-                    const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, doc, onSnapshot, setDoc, collection } = window.FBase;
-
+                const init = async () => {
+                    if (!window.FCloud) return;
+                    const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, collection, onSnapshot } = window.FCloud;
+                    
                     try {
-                        const firebaseConfig = JSON.parse(__firebase_config);
-                        const app = initializeApp(firebaseConfig);
+                        const config = JSON.parse(__firebase_config);
+                        const app = initializeApp(config);
                         const auth = getAuth(app);
                         const db = getFirestore(app);
 
-                        // 1. 身份驗證 (Rule 3)
-                        const initAuth = async () => {
-                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                                return await signInWithCustomToken(auth, __initial_auth_token);
-                            } else {
-                                return await signInAnonymously(auth);
-                            }
-                        };
-                        const res = await initAuth();
-                        setUser(res.user);
+                        // 登入
+                        const authRes = (typeof __initial_auth_token !== 'undefined' && __initial_auth_token)
+                            ? await signInWithCustomToken(auth, __initial_auth_token)
+                            : await signInAnonymously(auth);
+                        setUser(authRes.user);
 
-                        // 2. 建立正確路徑 (符合 Firestore 奇偶段數規則)
-                        // Itinerary: 6 段 (doc)
-                        const itinRef = doc(db, 'artifacts', appId, 'public', 'data', 'itinerary_store', 'main');
-                        // Chat: 5 段 (collection)
-                        const chatRef = collection(db, 'artifacts', appId, 'public', 'data', 'chat_messages');
-
-                        // 監聽行程
-                        unsubItin = onSnapshot(itinRef, (snap) => {
-                            if (snap.exists()) {
-                                setItineraryDB(snap.data().itinerary || {});
-                                setSyncStatus('online');
-                            } else {
-                                setDoc(itinRef, { itinerary: {}, lastUpdated: Date.now() });
-                            }
+                        // 監聽後台訂單 (5段路徑符合規則)
+                        const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+                        const unsub = onSnapshot(ordersRef, (snap) => {
+                            const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                            data.sort((a, b) => b.timestamp - a.timestamp);
+                            setOrders(data);
                             setIsLoading(false);
-                        }, (err) => {
-                            console.error("Itinerary Sync Error:", err);
-                            setSyncStatus('error');
                         });
 
-                        // 監聽留言板
-                        unsubChat = onSnapshot(chatRef, (snap) => {
-                            const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                            // 在前端進行排序，避免需要建立索引 (Rule 2)
-                            msgs.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-                            setChatMessages(msgs.slice(0, 20));
-                        }, (err) => {
-                            console.error("Chat Sync Error:", err);
-                        });
-
-                    } catch (e) {
-                        console.error("Firebase Initialization Error:", e);
-                    }
+                        return () => unsub();
+                    } catch (e) { console.error(e); }
                 };
-
-                const wait = setInterval(() => {
-                    if (window.FBase) {
-                        startSync();
-                        clearInterval(wait);
-                    }
-                }, 100);
-
-                return () => { if(unsubItin) unsubItin(); if(unsubChat) unsubChat(); };
+                
+                const timer = setInterval(() => { if(window.FCloud) { init(); clearInterval(timer); } }, 100);
             }, [appId]);
 
-            // --- 雲端寫入操作 ---
-            const saveToCloud = async (newDB) => {
-                if (!user || !window.FBase) return;
-                const { getFirestore, doc, updateDoc } = window.FBase;
-                const db = getFirestore();
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'itinerary_store', 'main');
-                try {
-                    await updateDoc(docRef, { itinerary: newDB, lastUpdated: Date.now() });
-                } catch (e) { console.error("Save Error:", e); }
-            };
-
-            const sendChat = async (e) => {
+            // --- 前台提交功能 (像下單一樣) ---
+            const handleSubmitOrder = async (e) => {
                 e.preventDefault();
-                if (!chatInput.trim() || !user || !window.FBase) return;
-                const { getFirestore, collection, addDoc } = window.FBase;
+                if (!formData.title || !user) return;
+                setIsSubmitting(true);
+
+                const { getFirestore, collection, addDoc } = window.FCloud;
                 const db = getFirestore();
-                const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'chat_messages');
+                const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+
                 try {
-                    await addDoc(colRef, {
-                        text: chatInput,
-                        uid: user.uid,
-                        timestamp: Date.now()
+                    await addDoc(ordersRef, {
+                        day: activeDay,
+                        title: formData.title,
+                        note: formData.note,
+                        userId: user.uid.substring(0, 5), // 匿名 ID
+                        timestamp: Date.now(),
+                        status: 'pending'
                     });
-                    setChatInput('');
-                } catch (e) { console.error("Post Chat Error:", e); }
+                    setFormData({ title: '', note: '' });
+                    alert('✅ 建議已傳送到管理員後台！');
+                } catch (e) { alert('傳送失敗'); }
+                setIsSubmitting(false);
             };
 
-            const deleteItin = (id) => {
-                if(!confirm('確定要刪除這項行程嗎？所有人看到的都會同步消失喔！')) return;
-                const updated = { ...itineraryDB, [activeDay]: (itineraryDB[activeDay] || []).filter(x => x.id !== id) };
-                setItineraryDB(updated);
-                saveToCloud(updated);
+            const deleteOrder = async (id) => {
+                const { getFirestore, doc, deleteDoc } = window.FCloud;
+                const db = getFirestore();
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', id));
             };
 
-            // --- 排序工具 ---
-            const getMinutes = (t) => {
-                if (!t) return 9999;
-                const m = t.match(/(\d{1,2})[:：](\d{1,2})/);
-                return m ? parseInt(m[1]) * 60 + parseInt(m[2]) : 9999;
-            };
-
-            const sortedList = useMemo(() => {
-                return [...(itineraryDB[activeDay] || [])].sort((a, b) => getMinutes(a.time) - getMinutes(b.time));
-            }, [activeDay, itineraryDB]);
-
-            if (isLoading) return <div className="min-h-screen flex flex-col items-center justify-center bg-white"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mb-4"></div><p className="font-bold text-slate-400">正在同步雲端資料...</p></div>;
+            if (isLoading) return <div className="min-h-screen flex items-center justify-center bg-white text-slate-400 font-bold animate-pulse">正在開啟系統...</div>;
 
             return (
-                <div className="flex flex-col min-h-screen text-slate-800">
-                    <div className="sync-badge">
-                        <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-400'}`}></div>
-                        <span className="font-bold text-slate-500 uppercase tracking-tighter">{syncStatus === 'online' ? '實時協作中' : '連線異常'}</span>
-                    </div>
-
-                    <header className="bg-gradient-header text-white p-6 shadow-xl sticky top-0 z-30">
+                <div className="min-h-screen flex flex-col">
+                    {/* Header */}
+                    <header className="bg-gradient-header text-white p-6 shadow-xl sticky top-0 z-50">
                         <div className="max-w-6xl mx-auto flex justify-between items-center">
                             <div className="flex items-center gap-3">
-                                <Icon name="Users" size={24} className="text-indigo-200" />
+                                <Icon name="Rocket" size={24} className="text-indigo-400" />
                                 <div>
-                                    <h1 className="text-xl md:text-2xl font-bold tracking-tight">京都旅程同步共享版</h1>
-                                    <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest opacity-60">多人實時編輯與對話</p>
+                                    <h1 className="text-xl font-bold">京都・大阪旅程管理</h1>
+                                    <p className="text-slate-400 text-[10px] uppercase tracking-widest font-bold">Request & Management System</p>
                                 </div>
+                            </div>
+                            <div className="flex bg-slate-800 p-1 rounded-xl">
+                                <button onClick={() => setView('user')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'user' ? 'bg-white text-slate-900 shadow-md' : 'text-slate-400'}`}>前台 (填寫)</button>
+                                <button onClick={() => setView('admin')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'admin' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>後台 (管理)</button>
                             </div>
                         </div>
                     </header>
 
-                    <nav className="bg-white border-b sticky top-[80px] md:top-[88px] z-20 overflow-x-auto no-scrollbar shadow-sm">
-                        <div className="max-w-6xl mx-auto flex px-4">
-                            {[1,2,3,4,5,6,7].map(d => (
-                                <button key={d} onClick={() => setActiveDay(d)} className={`flex-none px-6 py-4 text-sm font-black transition-all border-b-4 ${activeDay === d ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>Day {d}</button>
-                            ))}
-                        </div>
-                    </nav>
-
-                    <main className="flex-1 max-w-6xl mx-auto w-full p-4 md:p-6 pb-24">
-                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                            
-                            {/* 左側：即時行程表 */}
-                            <div className="lg:col-span-8 space-y-6">
-                                <section className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 fade-in">
-                                    <div className="flex justify-between items-center mb-8 border-b pb-4">
-                                        <h3 className="font-bold text-lg flex items-center gap-2"><Icon name="Calendar" className="text-indigo-500" /> 旅伴共同編輯行程</h3>
-                                        <button onClick={() => setShowModal(true)} className="bg-indigo-600 text-white px-5 py-2.5 rounded-2xl text-xs font-bold shadow-lg shadow-indigo-100 hover:scale-105 active:scale-95 transition-all flex items-center gap-1">
-                                            <Icon name="Plus" /> 新增行程
-                                        </button>
-                                    </div>
-
-                                    <div className="space-y-8 relative">
-                                        {sortedList.map((item, i) => (
-                                            <div key={item.id} className="flex gap-5 relative group">
-                                                {i !== sortedList.length - 1 && <div className="absolute left-[6px] top-7 w-[2px] h-full bg-slate-50"></div>}
-                                                <div className="timeline-dot mt-2 flex-shrink-0"></div>
-                                                <div className="flex-1 pb-4">
-                                                    <div className="flex justify-between items-baseline mb-2">
-                                                        <span className="text-xs font-black text-indigo-500 w-14 bg-indigo-50 px-2 py-1 rounded-md text-center">{item.time || '--:--'}</span>
-                                                        <div className="flex-1 ml-4">
-                                                            <h4 className="font-bold text-lg">
-                                                                {item.link ? <a href={item.link} target="_blank" className="text-indigo-600 underline underline-offset-8 hover:text-indigo-800">{item.title} 🔗</a> : item.title}
-                                                            </h4>
-                                                            {item.note && <p className="text-sm text-slate-500 mt-2 bg-slate-50 p-3 rounded-xl border border-slate-100 inline-block font-medium">{item.note}</p>}
-                                                        </div>
-                                                        <button onClick={() => deleteItin(item.id)} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-400 transition-all p-2">
-                                                            <Icon name="Trash" size={18} />
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                        {sortedList.length === 0 && <div className="text-center py-20 text-slate-300 font-bold italic bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-100">這一天還沒有內容，點擊新增按鈕來共享行程吧！</div>}
-                                    </div>
-                                </section>
-                            </div>
-
-                            {/* 右側：留言板 */}
-                            <div className="lg:col-span-4 space-y-6">
-                                <section className="bg-slate-900 rounded-[2.5rem] shadow-2xl flex flex-col h-[650px] overflow-hidden border border-white/10">
-                                    <div className="p-6 bg-indigo-950 border-b border-white/5 flex justify-between items-center">
-                                        <div className="flex items-center gap-2">
-                                            <Icon name="Message" className="text-indigo-400" size={20} />
-                                            <h3 className="text-white font-bold text-sm tracking-widest uppercase">即時討論區</h3>
+                    {view === 'user' ? (
+                        /* --- 前台使用者介面 --- */
+                        <main className="flex-1 max-w-6xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-12 gap-8 fade-in">
+                            <div className="lg:col-span-7 space-y-6">
+                                <section className="bg-white rounded-3xl p-8 border border-slate-200 card-shadow">
+                                    <div className="flex justify-between items-center mb-6">
+                                        <h2 className="text-2xl font-black text-slate-800">Day {activeDay} 行程總覽</h2>
+                                        <div className="flex gap-2">
+                                            {[1,2,3,4,5,6,7].map(d => (
+                                                <button key={d} onClick={() => setActiveDay(d)} className={`w-8 h-8 rounded-full text-xs font-bold transition-all ${activeDay === d ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>{d}</button>
+                                            ))}
                                         </div>
                                     </div>
-                                    
-                                    <div className="flex-1 overflow-y-auto p-5 space-y-5 no-scrollbar bg-slate-900">
-                                        {chatMessages.map(m => (
-                                            <div key={m.id} className={`flex flex-col ${m.uid === user?.uid ? 'items-end' : 'items-start'} fade-in`}>
-                                                <div className={`px-4 py-3 max-w-[90%] text-sm font-medium chat-bubble shadow-sm ${m.uid === user?.uid ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-200'}`}>
-                                                    {m.text}
-                                                </div>
-                                                <span className="text-[9px] text-slate-500 mt-2 uppercase font-black tracking-widest">
-                                                    {m.uid === user?.uid ? '我' : '旅伴'} • {new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                                </span>
-                                            </div>
-                                        ))}
-                                        {chatMessages.length === 0 && <p className="text-center text-slate-600 text-xs mt-20 font-bold italic opacity-50">尚無訊息，發個訊息跟家人討論行程吧！</p>}
+                                    <div className="p-10 border-2 border-dashed border-slate-100 rounded-3xl text-center">
+                                        <p className="text-slate-400 font-medium italic">這裡顯示主行程內容...<br/><span className="text-xs font-bold opacity-60">使用右側表單提交變更建議給管理員。</span></p>
                                     </div>
+                                </section>
+                            </div>
 
-                                    <form onSubmit={sendChat} className="p-5 bg-slate-800 border-t border-white/5 flex gap-3">
-                                        <input 
-                                            type="text" 
-                                            value={chatInput}
-                                            onChange={(e) => setChatInput(e.target.value)}
-                                            placeholder="輸入訊息..."
-                                            className="flex-1 bg-slate-900 border-none rounded-2xl text-white text-sm px-4 py-3 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
-                                        />
-                                        <button type="submit" className="bg-indigo-600 p-3 rounded-2xl text-white hover:bg-indigo-500 active:scale-90 transition-all shadow-lg shadow-indigo-900/20">
-                                            <Icon name="Send" size={18} />
+                            <div className="lg:col-span-5">
+                                <section className="bg-white rounded-3xl p-8 border border-slate-200 card-shadow sticky top-32">
+                                    <div className="flex items-center gap-2 mb-6 text-indigo-600 font-black uppercase text-xs tracking-wider">
+                                        <Icon name="Box" size={20} /> 提交建議與變更 (訂單模式)
+                                    </div>
+                                    <form onSubmit={handleSubmitOrder} className="space-y-5">
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">建議地點 / 內容</label>
+                                            <input 
+                                                type="text" 
+                                                value={formData.title} 
+                                                onChange={e => setFormData({...formData, title: e.target.value})}
+                                                placeholder="例如：想去這間咖啡廳、把集合改到 10:00"
+                                                className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">詳細備註 (選填)</label>
+                                            <textarea 
+                                                rows="3"
+                                                value={formData.note}
+                                                onChange={e => setFormData({...formData, note: e.target.value})}
+                                                placeholder="請說明原因或貼上網址..."
+                                                className="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                                            ></textarea>
+                                        </div>
+                                        <button 
+                                            type="submit" 
+                                            disabled={isSubmitting}
+                                            className="w-full py-4 bg-slate-900 text-white font-black rounded-2xl shadow-xl hover:bg-slate-800 active:scale-95 transition-all flex justify-center items-center gap-2"
+                                        >
+                                            {isSubmitting ? '正在傳送...' : <><Icon name="Send" /> 傳送至後台</>}
                                         </button>
+                                        <p className="text-[10px] text-slate-400 text-center font-bold">點擊傳送後，管理員會在其儀表板即時看見您的需求。</p>
                                     </form>
                                 </section>
-
-                                <section className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm text-center">
-                                    <p className="text-[10px] text-slate-400 mb-4 font-black uppercase tracking-[0.2em]">分享連結與家人協作</p>
-                                    <button 
-                                        onClick={() => {
-                                            const el = document.createElement('textarea');
-                                            el.value = window.location.href;
-                                            document.body.appendChild(el);
-                                            el.select();
-                                            document.execCommand('copy');
-                                            document.body.removeChild(el);
-                                            alert('同步連結已複製！傳給家人打開，大家就能在留言板聊天，並隨時同步更新清單。');
-                                        }}
-                                        className="w-full py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm font-bold text-indigo-600 hover:bg-indigo-50 transition-all flex justify-center items-center gap-2 shadow-sm"
-                                    >
-                                        <Icon name="Link" /> 複製專屬同步網址
-                                    </button>
-                                </section>
                             </div>
-                        </div>
-                    </main>
-
-                    {showModal && (
-                        <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
-                            <div className="bg-white rounded-[2.5rem] p-8 w-full max-w-sm shadow-2xl scale-in">
-                                <div className="flex justify-between items-center mb-6">
-                                    <h3 className="text-2xl font-black text-slate-800">新增同步行程</h3>
-                                    <button onClick={() => setShowModal(false)} className="text-slate-300 hover:text-slate-500 text-3xl">&times;</button>
+                        </main>
+                    ) : (
+                        /* --- 後台管理員儀表板 --- */
+                        <main className="flex-1 max-w-6xl mx-auto w-full p-6 fade-in">
+                            <div className="bg-white rounded-3xl border-2 admin-glow overflow-hidden">
+                                <div className="p-8 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                                    <div>
+                                        <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                                            <Icon name="Shield" className="text-indigo-600" /> 管理員後台
+                                        </h2>
+                                        <p className="text-slate-500 text-xs mt-1">目前共有 {orders.length} 筆來自前台的提交</p>
+                                    </div>
+                                    <div className="bg-indigo-50 text-indigo-600 px-4 py-2 rounded-xl text-xs font-bold">即時同步中</div>
                                 </div>
-                                <form onSubmit={(e) => {
-                                    e.preventDefault();
-                                    const current = itineraryDB[activeDay] || [];
-                                    const next = { ...itineraryDB, [activeDay]: [...current, { ...formData, id: Date.now().toString() }] };
-                                    setItineraryDB(next);
-                                    saveToCloud(next);
-                                    setShowModal(false);
-                                    setFormData({title:'',time:'',note:'',link:''});
-                                }} className="space-y-5">
-                                    <div>
-                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">抵達時間 (例如 09:30)</label>
-                                        <input type="text" value={formData.time} placeholder="14:30" onChange={e => setFormData({...formData, time: e.target.value})} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">活動名稱</label>
-                                        <input type="text" value={formData.title} placeholder="要做什麼？" onChange={e => setFormData({...formData, title: e.target.value})} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" required />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">備註說明 (選填)</label>
-                                        <input type="text" value={formData.note} placeholder="行程細節..." onChange={e => setFormData({...formData, note: e.target.value})} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">連結網址 (選填)</label>
-                                        <input type="url" value={formData.link} placeholder="https://..." onChange={e => setFormData({...formData, link: e.target.value})} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
-                                    </div>
-                                    <button type="submit" className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl shadow-xl shadow-indigo-200 mt-4 hover:bg-indigo-700 transition-all">同步至雲端</button>
-                                </form>
+
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left">
+                                        <thead>
+                                            <tr className="text-slate-400 text-[10px] uppercase font-black border-b border-slate-100">
+                                                <th className="px-8 py-4">時間軸 / 使用者</th>
+                                                <th className="px-8 py-4">天數</th>
+                                                <th className="px-8 py-4">建議內容</th>
+                                                <th className="px-8 py-4">詳細備註</th>
+                                                <th className="px-8 py-4 text-right">操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-50">
+                                            {orders.map(order => (
+                                                <tr key={order.id} className="hover:bg-slate-50/50 transition-all">
+                                                    <td className="px-8 py-6">
+                                                        <div className="font-bold text-slate-800 text-sm">USER-{order.userId}</div>
+                                                        <div className="text-[10px] text-slate-400">{new Date(order.timestamp).toLocaleString()}</div>
+                                                    </td>
+                                                    <td className="px-8 py-6 text-sm font-black text-indigo-600">Day {order.day}</td>
+                                                    <td className="px-8 py-6 text-sm font-bold text-slate-700">{order.title}</td>
+                                                    <td className="px-8 py-6 text-xs text-slate-500 max-w-xs">{order.note || '無'}</td>
+                                                    <td className="px-8 py-6 text-right">
+                                                        <button 
+                                                            onClick={() => deleteOrder(order.id)}
+                                                            className="p-2 text-slate-300 hover:text-red-500 transition-all"
+                                                            title="刪除此紀錄"
+                                                        >
+                                                            <Icon name="Trash" size={18} />
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                            {orders.length === 0 && (
+                                                <tr>
+                                                    <td colSpan="5" className="px-8 py-20 text-center text-slate-300 font-bold italic">目前尚無任何提交紀錄</td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
-                        </div>
+                        </main>
                     )}
+
+                    <footer className="bg-white border-t p-6 text-center text-slate-400 text-[10px] font-bold uppercase tracking-widest">
+                        Collaborative Itinerary System © 2026
+                    </footer>
                 </div>
             );
         };
